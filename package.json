@@ -1,0 +1,38 @@
+{
+  "name": "lmsmc_backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antonyrithick/LMSMC_backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/antonyrithick/LMSMC_backend/issues"
+  },
+  "homepage": "https://github.com/antonyrithick/LMSMC_backend#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "googleapis": "^162.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "nodemon": "^3.1.10",
+    "pg": "^8.16.1",
+    "pg-hstore": "^2.3.4",
+    "razorpay": "^2.9.6",
+    "sequelize": "^6.37.7",
+    "socket.io": "^4.8.1",
+    "winston": "^3.17.0"
+  }
+}

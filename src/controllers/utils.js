@@ -3,7 +3,7 @@ const path = require("path");
 const fs = require("fs");
 
 
-const SERVICE_ACCOUNT_PATH = path.join(__dirname, "/etc/secrets/service-account.json");
+const SERVICE_ACCOUNT_PATH = "/etc/secrets/service-account.json";
 if (!fs.existsSync(SERVICE_ACCOUNT_PATH)) {
   console.error("❌ Missing service-account.json file in /config folder");
   process.exit(1);

@@ -3,99 +3,206 @@ const User = require("../models/userModel");
 const Course = require("../models/course");
 const CoursePriceOption = require("../models/courseOptionModel");
 const Message = require("../models/messageModel");
-const Razorpay = require("razorpay");
 const { Op } = require("sequelize");
 const { clients } = require("../socket/socket");
+const axios = require("axios");
+const https = require("https");
+const crypto = require("crypto");
 
-// Initialize Razorpay instance
-const razorpayInstance = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+const PAYAID_API_KEY = "2741d0d9-75a4-4fef-adea-626b2a9204c8";
+const PAYAID_SALT = "7be167ac1b3ae6a3e4fdb54df6e9c483332fd64e";
+const PAYAID_GETURL = "https://sandbox.payaid.com/v2/getpaymentrequesturl";
+const PAYAID_STATUS_URL = "https://sandbox.payaid.com/v2/paymentstatus";
+const PAYAID_MODE = "TEST";
 
-/* ===============================================================
-   RAZORPAY ORDER CREATION
-================================================================= */
-// Create Razorpay order
+
+function calculatePayaidHash(body) {
+  const keys = Object.keys(body)
+    .filter(k => body[k] !== undefined && body[k] !== null && String(body[k]).trim() !== "")
+    .sort();
+
+  let hashString = PAYAID_SALT;
+
+  for (const key of keys) {
+    hashString += "|" + String(body[key]).trim();
+  }
+
+  return crypto
+    .createHash("sha512")
+    .update(hashString, "utf8")
+    .digest("hex")
+    .toUpperCase();
+}
+
+
 exports.createOrder = async (req, res) => {
-  try {
-    const { amount, currency = "INR", receipt } = req.body;
-    // Razorpay accepts amount in paise (cents), so multiply by 100
-    const order = await razorpayInstance.orders.create({ amount: amount * 100, currency, receipt });
-    res.json(order);
-  } catch (err) {
-    console.error("❌ Razorpay order error:", err);
-    res.status(500).json({ message: "Order creation failed" });
-  }
+  try {
+    const {
+      amount,
+      currency = "INR",
+      order_id,
+      name,
+      email,
+      phone,
+      return_url,
+
+      // EXTRA FIELDS FROM FRONTEND
+      description = "",
+      city = "",
+      country = "",
+      zip_code = "",
+
+      udf1 = "",
+      udf2 = "",
+      udf3 = ""
+    } = req.body;
+
+    // Validate mandatory fields only
+    if (!amount || !order_id || !name || !email || !return_url) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    // ------------ Payload for PayAid API (ONLY valid PayAid params) ------------
+    const params = {
+      api_key: PAYAID_API_KEY,
+      order_id,
+      amount: parseFloat(amount).toFixed(2),
+      currency,
+      description: description || `Payment for ${order_id}`,
+      name,
+      email,
+      phone: phone || "",
+      mode: PAYAID_MODE,
+      return_url,
+      udf1,       // studentId
+      udf2,       // courseId
+      udf3        // selectedOptionId
+    };
+
+    params.hash = calculatePayaidHash(params);
+
+    const httpsAgent = new https.Agent({
+      rejectUnauthorized: true,
+      keepAlive: true,
+      minVersion: "TLSv1.2",
+      servername: "sandbox.payaid.com"
+    });
+
+    const resp = await axios.post(PAYAID_GETURL, params, {
+      httpsAgent,
+      headers: { "Content-Type": "application/json" }
+    });
+
+    return res.json({
+      success: true,
+      paymentUrl: resp.data.data.url,
+      uuid: resp.data.data.uuid,
+
+      // Return all fields back if needed
+      receivedParams: {
+        amount,
+        currency,
+        order_id,
+        name,
+        email,
+        phone,
+        city,
+        country,
+        zip_code,
+        description,
+        udf1,
+        udf2,
+        udf3
+      }
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      message: "Order creation failed",
+      error: err
+    });
+  }
 };
 
-/* ===============================================================
-   VERIFY PAYMENT & CREATE ENROLLMENT (UPDATED)
-================================================================= */
-// Verify payment & create enrollment
-exports.verifyAndCreateEnrollment = async (req, res) => {
-  try {
-    const {
-      studentid,
-      courseId,
-      selectedOptionId,
-      amount,
-      paymentMethod,
-      razorpay_order_id,
-      razorpay_payment_id
-    } = req.body;
 
-    // 1. Validate required fields
-    if (!studentid || !courseId || !amount || !paymentMethod) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
+exports.payaidCallback = async (req, res) => {
+  try {
+    const body = req.body;
 
-    const student = await User.findByPk(studentid);
-    if (!student) return res.status(404).json({ message: "Student not found" });
+    const receivedHash = body.hash;
+    const temp = { ...body };
+    delete temp.hash;
 
-    const course = await Course.findByPk(courseId);
-    if (!course) return res.status(404).json({ message: "Course not found" });
+    const expectedHash = calculatePayaidHash(temp);
 
-    const selectedOption = selectedOptionId
-      ? await CoursePriceOption.findByPk(selectedOptionId)
-      : null;
+    if (receivedHash !== expectedHash) {
+      return res.status(400).send("Hash mismatch");
+    }
 
-    // 2. Check for existing active enrollment
-    const existingEnrollment = await Enrollment.findOne({
-      where: { 
-        studentId: studentid, 
-        courseId: courseId, 
-        // Check for active status (enrolled, trainer_assigned, in_progress). Exclude cancelled/completed.
-        status: { [Op.notIn]: ['cancelled', 'completed'] } 
+    // OPTIONAL: CONFIRM PAYMENT STATUS
+    let confirm = false;
+    try {
+      const statusBody = {
+        api_key: PAYAID_API_KEY,
+        order_id: body.order_id,
+        transaction_id: body.transaction_id
+      };
+      statusBody.hash = calculatePayaidHash(statusBody);
+
+      const statusResp = await axios.post(PAYAID_STATUS_URL, statusBody);
+
+      if (statusResp.data?.data?.[0]?.response_code === 0) {
+        confirm = true;
       }
-    });
-    
-    if (existingEnrollment) {
-      return res.status(400).json({ message: "Student is already actively enrolled in this course." });
-    }
+    } catch (e) {}
 
-    // 3. Create the enrollment
-    const enrollment = await Enrollment.create({
-      studentName: student.name,
-      studentEmail: student.email,
-      studentId: student.id,
-      courseId: course.id,
-      selectedOptionId: selectedOption ? selectedOption.id : null,
-      amount,
-      paymentMethod,
-      razorpay_order_id,
-      razorpay_payment_id,
-      courseStages: course.stages || [],
-      status: "enrolled", // Paid, pending trainer assignment
-      trainerId: null,
-      assignedAt: null,
-    });
+    // IF PAYMENT FAILED
+    if (!confirm && body.response_code !== 0) {
+      return res.status(200).send("Payment failed");
+    }
 
-    res.status(201).json({ success: true, message: "✅ Enrollment created successfully. Trainer assignment pending.", enrollment });
-  } catch (err) {
-    console.error("Enrollment creation error:", err);
-    res.status(500).json({ message: err.message || "Server error" });
-  }
+    // -----------------------------
+    // 🔥 CREATE ENROLLMENT HERE
+    // -----------------------------
+    const studentId = body.udf1;
+    const courseId = body.udf2;
+    const optionId = body.udf3;
+
+    const student = await User.findByPk(studentId);
+    const course = await Course.findByPk(courseId);
+    const option = optionId ? await CoursePriceOption.findByPk(optionId) : null;
+
+    if (!student || !course) return res.status(200).send("Invalid mapping");
+
+    const exists = await Enrollment.findOne({
+      where: {
+        studentId,
+        courseId,
+        status: { [Op.notIn]: ["cancelled", "completed"] }
+      }
+    });
+
+    if (exists) return res.status(200).send("Already enrolled");
+
+    await Enrollment.create({
+      studentName: student.name,
+      studentEmail: student.email,
+      studentId,
+      courseId,
+      selectedOptionId: option?.id || null,
+      amount: parseFloat(body.amount),
+      paymentMethod: "payaid",
+      external_transaction_id: body.transaction_id,
+      external_response: body,
+      courseStages: course.stages || [],
+      status: "enrolled"
+    });
+
+    return res.status(200).send("OK");
+
+  } catch (err) {
+    return res.status(500).send("Server error");
+  }
 };
 
 /* ===============================================================

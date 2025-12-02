@@ -5,7 +5,7 @@ const { verifyToken } = require("../middleware/socketAuth");
 
 // Razorpay payment & enrollment
 router.post("/order", enrollmentController.createOrder);
-router.post("/verify", enrollmentController.verifyAndCreateEnrollment);
+router.post("/verify", enrollmentController.payaidCallback);
 
 // Enrollment CRUD
 router.post("/student-enrollments", enrollmentController.getStudentEnrollments);

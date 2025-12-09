@@ -5,205 +5,96 @@ const CoursePriceOption = require("../models/courseOptionModel");
 const Message = require("../models/messageModel");
 const { Op } = require("sequelize");
 const { clients } = require("../socket/socket");
-const axios = require("axios");
-const https = require("https");
-const crypto = require("crypto");
-
-const PAYAID_API_KEY = "2741d0d9-75a4-4fef-adea-626b2a9204c8";
-const PAYAID_SALT = "7be167ac1b3ae6a3e4fdb54df6e9c483332fd64e";
-const PAYAID_GETURL = "https://sandbox.payaid.com/v2/getpaymentrequesturl";
-const PAYAID_STATUS_URL = "https://sandbox.payaid.com/v2/paymentstatus";
-const PAYAID_MODE = "TEST";
+const ExcelJS = require('exceljs');
+const moment = require("moment");
 
 
-function calculatePayaidHash(body) {
-  const keys = Object.keys(body)
-    .filter(k => body[k] !== undefined && body[k] !== null && String(body[k]).trim() !== "")
-    .sort();
-
-  let hashString = PAYAID_SALT;
-
-  for (const key of keys) {
-    hashString += "|" + String(body[key]).trim();
-  }
-
-  return crypto
-    .createHash("sha512")
-    .update(hashString, "utf8")
-    .digest("hex")
-    .toUpperCase();
-}
+const Razorpay = require("razorpay");
 
 
+const razorpayInstance = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// Create Razorpay order
 exports.createOrder = async (req, res) => {
   try {
+    const { amount, currency = "INR", receipt } = req.body;
+    const order = await razorpayInstance.orders.create({ amount: amount * 100, currency, receipt });
+    res.json(order);
+  } catch (err) {
+    console.error("❌ Razorpay order error:", err);
+    res.status(500).json({ message: "Order creation failed" });
+  }
+};
+
+// Verify payment & create enrollment
+
+
+exports.verifyAndCreateEnrollment = async (req, res) => {
+  try {
     const {
+      studentid,
+      courseId,
+      selectedOptionId,
       amount,
-      currency = "INR",
-      order_id,
-      name,
-      email,
-      phone,
-      return_url,
-
-      // EXTRA FIELDS FROM FRONTEND
-      description = "",
-      city = "",
-      country = "",
-      zip_code = "",
-
-      udf1 = "",
-      udf2 = "",
-      udf3 = ""
+      paymentMethod,
+      razorpay_order_id,
+      razorpay_payment_id
     } = req.body;
 
-    // Validate mandatory fields only
-    if (!amount || !order_id || !name || !email || !return_url) {
+    if (!studentid || !courseId || !amount || !paymentMethod) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // ------------ Payload for PayAid API (ONLY valid PayAid params) ------------
-    const params = {
-      api_key: PAYAID_API_KEY,
-      order_id,
-      amount: parseFloat(amount).toFixed(2),
-      currency,
-      description: description || `Payment for ${order_id}`,
-      name,
-      email,
-      phone: phone || "",
-      mode: PAYAID_MODE,
-      return_url,
-      udf1,       // studentId
-      udf2,       // courseId
-      udf3        // selectedOptionId
-    };
+    const student = await User.findByPk(studentid);
+    if (!student) return res.status(404).json({ message: "Student not found" });
 
-    params.hash = calculatePayaidHash(params);
-
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: true,
-      keepAlive: true,
-      minVersion: "TLSv1.2",
-      servername: "sandbox.payaid.com"
-    });
-
-    const resp = await axios.post(PAYAID_GETURL, params, {
-      httpsAgent,
-      headers: { "Content-Type": "application/json" }
-    });
-
-    return res.json({
-      success: true,
-      paymentUrl: resp.data.data.url,
-      uuid: resp.data.data.uuid,
-
-      // Return all fields back if needed
-      receivedParams: {
-        amount,
-        currency,
-        order_id,
-        name,
-        email,
-        phone,
-        city,
-        country,
-        zip_code,
-        description,
-        udf1,
-        udf2,
-        udf3
-      }
-    });
-
-  } catch (err) {
-    return res.status(500).json({
-      message: "Order creation failed",
-      error: err
-    });
-  }
-};
-
-
-exports.payaidCallback = async (req, res) => {
-  try {
-    const body = req.body;
-
-    const receivedHash = body.hash;
-    const temp = { ...body };
-    delete temp.hash;
-
-    const expectedHash = calculatePayaidHash(temp);
-
-    if (receivedHash !== expectedHash) {
-      return res.status(400).send("Hash mismatch");
-    }
-
-    // OPTIONAL: CONFIRM PAYMENT STATUS
-    let confirm = false;
-    try {
-      const statusBody = {
-        api_key: PAYAID_API_KEY,
-        order_id: body.order_id,
-        transaction_id: body.transaction_id
-      };
-      statusBody.hash = calculatePayaidHash(statusBody);
-
-      const statusResp = await axios.post(PAYAID_STATUS_URL, statusBody);
-
-      if (statusResp.data?.data?.[0]?.response_code === 0) {
-        confirm = true;
-      }
-    } catch (e) {}
-
-    // IF PAYMENT FAILED
-    if (!confirm && body.response_code !== 0) {
-      return res.status(200).send("Payment failed");
-    }
-
-    // -----------------------------
-    // 🔥 CREATE ENROLLMENT HERE
-    // -----------------------------
-    const studentId = body.udf1;
-    const courseId = body.udf2;
-    const optionId = body.udf3;
-
-    const student = await User.findByPk(studentId);
     const course = await Course.findByPk(courseId);
-    const option = optionId ? await CoursePriceOption.findByPk(optionId) : null;
+    if (!course) return res.status(404).json({ message: "Course not found" });
 
-    if (!student || !course) return res.status(200).send("Invalid mapping");
+    const selectedOption = selectedOptionId
+      ? await CoursePriceOption.findByPk(selectedOptionId)
+      : null;
 
-    const exists = await Enrollment.findOne({
-      where: {
-        studentId,
-        courseId,
-        status: { [Op.notIn]: ["cancelled", "completed"] }
-      }
-    });
+    // ✔ Calculate dates
+    const enrollmentDate = new Date();
+    const expiryDate = new Date();
+    expiryDate.setDate(enrollmentDate.getDate() + 30);
 
-    if (exists) return res.status(200).send("Already enrolled");
-
-    await Enrollment.create({
+    const enrollment = await Enrollment.create({
       studentName: student.name,
       studentEmail: student.email,
-      studentId,
-      courseId,
-      selectedOptionId: option?.id || null,
-      amount: parseFloat(body.amount),
-      paymentMethod: "payaid",
-      external_transaction_id: body.transaction_id,
-      external_response: body,
+      studentId: student.id,
+      courseId: course.id,
+      selectedOptionId: selectedOption ? selectedOption.id : null,
+      amount,
+      paymentMethod,
+      razorpay_order_id,
+      razorpay_payment_id,
+
+      enrollmentDate,
+      expiryDate,
+
       courseStages: course.stages || [],
-      status: "enrolled"
+      status: "enrolled",
+      trainerId: null,
+      assignedAt: null,
     });
 
-    return res.status(200).send("OK");
+    res.status(201).json({
+      success: true,
+      message: "Enrollment created successfully",
+      enrollment,
+    });
 
   } catch (err) {
-    return res.status(500).send("Server error");
+    console.error("Enrollment creation error:", err);
+    res.status(500).json({ message: err.message || "Server error" });
   }
 };
+
 
 /* ===============================================================
    ASSIGN TRAINER (UPDATED)
@@ -572,6 +463,67 @@ exports.updateProgress = async (req, res) => {
 
 
 
+exports.getsixmonthReports = async (req, res) => {
+  try {
+    // Get date range (last 6 months)
+    const endDate = moment().endOf("month");
+    const startDate = moment().subtract(5, "months").startOf("month");
+
+    // Fetch all enrollments in last 6 months
+    const enrollments = await Enrollment.findAll({
+      where: {
+        enrollmentDate: {
+          [Op.between]: [startDate.toDate(), endDate.toDate()],
+        },
+      },
+      attributes: [
+        "amount",
+        "enrollmentDate",
+        [Enrollment.sequelize.fn("DATE_TRUNC", "month", Enrollment.sequelize.col("enrollmentDate")), "month"]
+      ],
+      order: [["enrollmentDate", "ASC"]],
+    });
+
+    // Prepare structure for last 6 months
+    const report = [];
+    for (let i = 0; i < 6; i++) {
+      const monthLabel = moment().subtract(5 - i, "months").format("MMM");
+      report.push({
+        month: monthLabel,
+        enrollments: 0,
+        payments: 0
+      });
+    }
+
+    // Aggregate data into structure
+    enrollments.forEach((e) => {
+      const monthIndex = report.findIndex(
+        (m) => m.month === moment(e.enrollmentDate).format("MMM")
+      );
+
+      if (monthIndex !== -1) {
+        report[monthIndex].enrollments += 1;
+        report[monthIndex].payments += Number(e.amount);
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Last 6 months report generated successfully",
+      data: report,
+    });
+  } catch (error) {
+    console.error("❌ Error generating 6 month report:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate 6 month report",
+      error: error.message,
+    });
+  }
+};
+
+
+
 
 
 
@@ -621,6 +573,75 @@ exports.getAllPayments = async (req, res) => {
       message: "Error fetching payments",
       error: error.message,
     });
+  }
+};
+
+exports.getAllPaymentsExport = async (req, res) => {
+  
+  try {
+    // 1️⃣ Fetch all payment/enrollment data
+    const enrollments = await Enrollment.findAll({
+      include: [
+        { model: User, as: "student" },
+        { model: Course, as: "course" },
+      ],
+      order: [['createdAt', 'DESC']]
+    });
+
+    // 2️⃣ Create workbook + worksheet
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Payments");
+
+    // 3️⃣ Add Excel Header
+    worksheet.columns = [
+      { header: 'ID', key: 'id', width: 10 },
+      { header: 'Student Name', key: 'studentName', width: 25 },
+      { header: 'Course', key: 'courseName', width: 25 },
+      { header: 'Amount', key: 'amount', width: 15 },
+      
+      { header: 'Payment Date', key: 'date', width: 20 },
+    ];
+
+    // 4️⃣ Add Rows
+    enrollments.forEach(e => {
+      worksheet.addRow({
+        id: e.id,
+        studentName: e.student?.name,
+        courseName: e.course?.title,
+        amount: e.amount,
+       
+        date: e.createdAt.toISOString().split("T")[0],
+      });
+    });
+
+    // 5️⃣ Style Header Row
+    worksheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true };
+      cell.alignment = { horizontal: 'center' };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE8E8E8" }
+      };
+    });
+
+    // 6️⃣ Set Response Headers
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=payments.xlsx'
+    );
+
+    // 7️⃣ Send Excel File
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Excel export failed", error: err.message });
   }
 };
 

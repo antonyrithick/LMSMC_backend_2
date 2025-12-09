@@ -36,6 +36,11 @@ const Enrollment = sequelize.define("Enrollment", {
     razorpay_payment_id: { type: DataTypes.STRING },
 
     enrollmentDate: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
+    expiryDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+}
+,
 
     // 🔑 THE CRITICAL ADDITION: Status column
     status: {
@@ -61,6 +66,7 @@ const Enrollment = sequelize.define("Enrollment", {
         type: DataTypes.JSON,
         defaultValue: [],
     },
+    
 });
 
 module.exports = Enrollment;

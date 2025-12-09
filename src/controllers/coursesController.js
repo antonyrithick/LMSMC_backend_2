@@ -580,13 +580,18 @@ exports.getStudentEnrolledClasses = async (req, res) => {
 ================================================================= */
 exports.createCourse = async (req, res) => {
   try {
-    const { title, description, totalClasses } = req.body;
+    const { title, description, totalClasses ,rating} = req.body;
     const rawOptions = req.body.options;
     const courseThumbnail = req.files?.courseThumbnail?.[0]?.filename;
 
     if (!title || !totalClasses) {
       return res.status(400).json({ error: "Title and totalClasses are required." });
     }
+
+    const ratingValue = parseFloat(rating) || 0;
+if (ratingValue < 0 || ratingValue > 5) {
+  return res.status(400).json({ error: "Rating must be between 0 and 5." });
+}
 
     const finalTotalClasses = parseInt(totalClasses) || 0;
     if (finalTotalClasses <= 0) {
@@ -599,7 +604,7 @@ exports.createCourse = async (req, res) => {
       thumbnail: courseThumbnail || null,
       duration: 0,
       totalClasses: finalTotalClasses,
-      rating: 0,
+      rating: ratingValue,
     });
 
     if (rawOptions && rawOptions !== "undefined") {
@@ -708,7 +713,7 @@ exports.updateCourse = async (req, res) => {
       title: req.body.title,
       description: req.body.description,
       TrainerId: req.body.trainerId ?? course.TrainerId,
-      rating: course.rating || 0,
+      rating:  parseFloat(req.body.rating) || 0,
     };
 
     if (req.body.totalClasses !== undefined) {
